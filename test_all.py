@@ -15,9 +15,14 @@ for filename in files:
     
     path = os.path.join(warehouse_folder, filename)
     wh = Warehouse()
-    wh.load_warehouse(path)
     
-    result = [None]  # store result from thread
+    try:
+        wh.load_warehouse(path)
+    except AssertionError:
+        print(f"{filename:30} | INVALID WAREHOUSE FILE")
+        continue
+    
+    result = [None]
     
     def run():
         result[0] = solve_weighted_sokoban(wh)
@@ -25,12 +30,12 @@ for filename in files:
     t0 = time.time()
     thread = threading.Thread(target=run)
     thread.start()
-    thread.join(timeout=TIMEOUT)  # wait max 60 seconds
+    thread.join(timeout=TIMEOUT)
     t1 = time.time()
     
     if thread.is_alive():
         print(f"{filename:30} | TIMED OUT after {TIMEOUT}s")
-    elif result[0][0] == 'Impossible':
+    elif result[0] is None or result[0][0] == 'Impossible':
         print(f"{filename:30} | Impossible  | {t1-t0:.3f}s")
     else:
         solution, cost = result[0]
