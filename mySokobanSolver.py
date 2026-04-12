@@ -237,21 +237,17 @@ class SokobanPuzzle(search.Problem):
         
         return c + 1
     
-    def h(self, node): #calculates the heuristic distnace to the target for each unsolved box
+    def h(self, node):
         worker, boxes = node.state
         total = 0
-        
         for i, box in enumerate(boxes):
             if box in self.targets:
                 continue
-            
-            weight = self.weights[i]  # use index, not .get()
-            
+            weight = self.weights[i]
             min_dist = min(abs(box[0]-t[0]) + abs(box[1]-t[1]) 
                         for t in self.targets)
-            
             total += min_dist * (1 + weight)
-        
+        self.h_calls = getattr(self, 'h_calls', 0) + 1
         return total
     
 
@@ -337,8 +333,6 @@ def solve_weighted_sokoban(warehouse):
             C is the total cost of the action sequence C
 
     '''
-    
-   
     problem = SokobanPuzzle(warehouse)
     node = search.astar_graph_search(problem, problem.h)
     
