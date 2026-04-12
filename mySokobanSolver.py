@@ -37,13 +37,8 @@ import sokoban
 
 
 def my_team():
-    '''
-    Return the list of the team members of this assignment submission as a list
-    of triplet of the form (student_number, first_name, last_name)
-    
-    '''
-#    return [ (1234567, 'Ada', 'Lovelace'), (1234568, 'Grace', 'Hopper'), (1234569, 'Eva', 'Tardos') ]
-    raise NotImplementedError()
+
+    return [ (11806427, 'Aathmika', 'Gokula Krishna'), (11539658, 'Jack', 'Hillman'), (1234569, 'Eva', 'Tardos') ]
 
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
@@ -170,28 +165,96 @@ class SokobanPuzzle(search.Problem):
     the provided module 'search.py'. 
     
     '''
-    
-    #
-    #         "INSERT YOUR CODE HERE"
-    #
-    #     Revisit the sliding puzzle and the pancake puzzle for inspiration!
-    #
-    #     Note that you will need to add several functions to 
-    #     complete this class. For example, a 'result' method is needed
-    #     to satisfy the interface of 'search.Problem'.
-    #
-    #     You are allowed (and encouraged) to use auxiliary functions and classes
+    def __init__(self, warehouse): #initial values
+        self.walls = set(warehouse.walls) #get the walls
 
-    
-    def __init__(self, warehouse):
-        raise NotImplementedError()
+        self.targets = set(warehouse.targets) #get the target
 
-    def actions(self, state):
-        """
-        Return the list of actions that can be executed in the given state.
+        self.weights = list(warehouse.weights)  #get the weights of the boxes
+
+        self.direction_map = {
+            'Left':  (-1,  0),
+            'Right': ( 1,  0),
+            'Up':    ( 0, -1),
+            'Down':  ( 0,  1),
+        }
+
+        taboo_string = taboo_cells(warehouse) #convert taboo cells to a tuple from the string
+        self.taboo = set()
+        for y, row in enumerate(taboo_string.split('\n')):
+            for x, char in enumerate(row):
+                if char == 'X':
+                    self.taboo.add((x, y))
+
+        initial_state = (warehouse.worker, tuple(warehouse.boxes))
+        super().__init__(initial_state)
+
+    def actions(self, state): #checks each direction; left right up down. returns a list of valid actions that avoid taboo cells or walls or moving boxes into places that are bad
+        worker, boxes = state
+        boxes_set = set(boxes)
+        valid_actions = []
         
-        """
-        raise NotImplementedError
+        for direction, (dx, dy) in self.direction_map.items():
+            new_worker = (worker[0]+dx, worker[1]+dy)
+            
+            if new_worker in self.walls:
+                continue
+            if new_worker in boxes_set:
+                new_box = (new_worker[0]+dx, new_worker[1]+dy)
+                if new_box in self.walls or new_box in boxes_set:
+                    continue
+                if new_box in self.taboo:
+                    continue
+            valid_actions.append(direction)
+        return valid_actions
+    
+
+    def result(self, state, action): #applies all valid actions against the current worker, and returns the results
+        worker, boxes = state
+        boxes = list(boxes)
+        dx, dy = self.direction_map[action]
+        new_worker = (worker[0] + dx, worker[1] + dy)
+
+        if new_worker in boxes:
+            idx = boxes.index(new_worker)  
+            new_box = (new_worker[0] + dx, new_worker[1] + dy)
+            boxes[idx] = new_box  
+
+        return (new_worker, tuple(boxes)) 
+
+    def goal_test(self, state): #checks to see if game is won
+        worker, boxes = state
+        return all(box in self.targets for box in boxes)
+    
+    def path_cost(self, c, state1, action, state2): #calculate the current cost of each box
+        boxes1 = state1[1]  
+        boxes2 = state2[1]  
+        
+        for i, (b1, b2) in enumerate(zip(boxes1, boxes2)):
+            if b1 != b2: 
+                weight = self.weights[i]  
+                return c + 1 + weight
+        
+        return c + 1
+    
+    def h(self, node): #calculates the heuristic distnace to the target for each unsolved box
+        worker, boxes = node.state
+        total = 0
+        
+        for i, box in enumerate(boxes):
+            if box in self.targets:
+                continue
+            
+            weight = self.weights[i]  # use index, not .get()
+            
+            min_dist = min(abs(box[0]-t[0]) + abs(box[1]-t[1]) 
+                        for t in self.targets)
+            
+            total += min_dist * (1 + weight)
+        
+        return total
+    
+
 
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
@@ -260,7 +323,7 @@ def solve_weighted_sokoban(warehouse):
     @param 
      warehouse: a valid Warehouse object
 
-    @return
+    @return 
     
         If puzzle cannot be solved 
             return 'Impossible', None
@@ -275,8 +338,14 @@ def solve_weighted_sokoban(warehouse):
 
     '''
     
-    raise NotImplementedError()
-
+   
+    problem = SokobanPuzzle(warehouse)
+    node = search.astar_graph_search(problem, problem.h)
+    
+    if node is None:
+        return 'Impossible', None
+    
+    return node.solution(), node.path_cost
 
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
