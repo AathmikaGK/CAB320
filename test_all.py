@@ -14,13 +14,12 @@ try:
     for filename in files:
         if not filename.endswith('.txt'):
             continue
-        
+
         path = os.path.join(warehouse_folder, filename)
         wh = Warehouse()
-        
         try:
             wh.load_warehouse(path)
-        except AssertionError:
+        except Exception:
             print(f"{filename:30} | INVALID WAREHOUSE FILE")
             continue
 
@@ -44,9 +43,9 @@ try:
         while thread.is_alive():
             thread.join(timeout=1)
             elapsed = time.time() - t0
-            if elapsed > 1 and thread.is_alive():  # only show progress if taking a while
+            if elapsed > 1 and thread.is_alive():
                 h_calls = getattr(problem_ref[0], 'h_calls', 0)
-                print(f"  {filename:30} | h_calls: {h_calls:8} | elapsed: {elapsed:.1f}s", 
+                print(f"  {filename:30} | h_calls: {h_calls:8} | elapsed: {elapsed:.1f}s",
                       end='\r', flush=True)
                 showed_progress = True
             if elapsed >= TIMEOUT:
@@ -56,7 +55,7 @@ try:
         h_calls = getattr(problem_ref[0], 'h_calls', 0)
 
         if showed_progress:
-            print()  # only print newline if we showed progress
+            print()
 
         if thread.is_alive():
             print(f"{filename:30} | TIMED OUT   | h_calls: {h_calls:8} | {t1-t0:.3f}s")

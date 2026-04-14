@@ -186,6 +186,9 @@ class SokobanPuzzle(search.Problem):
                 if char == 'X':
                     self.taboo.add((x, y))
 
+        self._h_cache = {}
+        self.h_calls = 0
+
         initial_state = (warehouse.worker, tuple(warehouse.boxes))
         super().__init__(initial_state)
 
@@ -238,17 +241,68 @@ class SokobanPuzzle(search.Problem):
         return c + 1
     
     def h(self, node):
-        worker, boxes = node.state
-        total = 0
-        for i, box in enumerate(boxes):
-            if box in self.targets:
+        self.h_calls += 1
+
+        # Cache results: astar may evaluate the same state from different paths
+        state = node.state
+        if state in self._h_cache:
+            return self._h_cache[state]
+
+        worker, boxes = state
+        targets = list(self.targets)
+
+        unplaced = [(i, box) for i, box in enumerate(boxes) if box not in self.targets]
+
+        if not unplaced:
+            self._h_cache[state] = 0
+            return 0
+
+        n = len(unplaced)   # unplaced boxes
+        m = len(targets)    # available targets
+
+        # Lower-bound push cost for each (unplaced box, target) pair.
+        # Each push step costs 1 + weight, and at least manhattan_dist pushes
+        # are required, so  manhattan * (1 + weight)  is admissible.
+        cost = [
+            [(abs(bpos[0] - t[0]) + abs(bpos[1] - t[1])) * (1 + self.weights[bi])
+             for t in targets]
+            for bi, bpos in unplaced
+        ]
+
+        # Optimal 1-to-1 box→target assignment via bitmask DP.
+        # dp[mask] = min cost to assign the first popcount(mask) unplaced boxes
+        #            to the targets whose bits are set in mask.
+        # Complexity: O(n * 2^m) — negligible for typical Sokoban sizes (≤8 boxes).
+        INF = float('inf')
+        dp = [INF] * (1 << m)
+        dp[0] = 0
+        for mask in range(1 << m):
+            if dp[mask] == INF:
                 continue
-            weight = self.weights[i]
-            min_dist = min(abs(box[0]-t[0]) + abs(box[1]-t[1]) 
-                        for t in self.targets)
-            total += min_dist * (1 + weight)
-        self.h_calls = getattr(self, 'h_calls', 0) + 1
-        return total
+            box_idx = bin(mask).count('1')   # next box to assign
+            if box_idx >= n:
+                continue
+            for t_idx in range(m):
+                if not (mask >> t_idx & 1):  # target not yet taken
+                    new_mask = mask | (1 << t_idx)
+                    new_cost = dp[mask] + cost[box_idx][t_idx]
+                    if new_cost < dp[new_mask]:
+                        dp[new_mask] = new_cost
+
+        min_box_cost = min(
+            dp[mask] for mask in range(1 << m) if bin(mask).count('1') == n
+        )
+
+        # Worker must walk to at least one unplaced box before pushing starts.
+        # This repositioning cost is independent of (and additive to) push costs.
+        worker_dist = min(
+            abs(worker[0] - bpos[0]) + abs(worker[1] - bpos[1])
+            for _, bpos in unplaced
+        )
+
+        result = min_box_cost + worker_dist
+        self._h_cache[state] = result
+        return result
     
 
 
@@ -333,6 +387,9 @@ def solve_weighted_sokoban(warehouse):
             C is the total cost of the action sequence C
 
     '''
+    if not hasattr(warehouse, 'walls'):
+        return 'Impossible', None
+
     problem = SokobanPuzzle(warehouse)
     node = search.astar_graph_search(problem, problem.h)
     

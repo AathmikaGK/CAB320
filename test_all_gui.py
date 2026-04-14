@@ -1,294 +1,318 @@
-"""
-Sokoban Warehouse Test GUI
-Each warehouse runs in its own process so the UI stays responsive.
-"""
+import os
+import time
+import queue
+import signal
+import threading
+import multiprocessing as mp
 import tkinter as tk
 from tkinter import ttk
-import multiprocessing as mp
-import threading
-import time
-import os
 
-BG       = "#0f1117"
-PANEL    = "#1a1d27"
-ACCENT   = "#00d4aa"
-DIM      = "#3a3f55"
-TEXT     = "#e8eaf0"
-TEXT_DIM = "#6b7080"
-
+TIMEOUT = 500
+N_WORKERS = max(1, os.cpu_count() - 2)
 WAREHOUSE_FOLDER = './warehouses'
-DEFAULT_TIMEOUT  = 500
-DEFAULT_WORKERS  = 2
 
 
-# ── worker (runs in child process) ────────────────────────────────────────────
-
-def solve_warehouse(filename, timeout, result_queue):
-    import search, time, os, threading
+# ─────────────────────────────────────────────────────────────
+def solve_one(path):
+    """Runs inside a worker process."""
+    import time, os, search
     from sokoban import Warehouse
     from mySokobanSolver import SokobanPuzzle
 
-    path = os.path.join(WAREHOUSE_FOLDER, filename)
-    wh   = Warehouse()
+    filename = os.path.basename(path)
+    wh = Warehouse()
+
     try:
         wh.load_warehouse(path)
     except Exception:
-        result_queue.put({"file": filename, "status": "invalid"})
-        return
+        return filename, 'INVALID', None, None, 0, 0.0
 
-    result      = [None]
-    problem_ref = [None]
-
-    def run():
-        p = SokobanPuzzle(wh)
-        problem_ref[0] = p
-        node = search.astar_graph_search(p, p.h)
-        result[0] = ('Impossible', None) if node is None else (node.solution(), node.path_cost)
-
-    t0     = time.time()
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-
-    last_update = 0
-    while thread.is_alive():
-        thread.join(timeout=0.5)
-        elapsed = time.time() - t0
-        if elapsed - last_update >= 2:
-            h = getattr(problem_ref[0], 'h_calls', 0)
-            result_queue.put({"file": filename, "status": "running",
-                               "elapsed": elapsed, "h_calls": h})
-            last_update = elapsed
-        if elapsed >= timeout:
-            break
-
+    t0 = time.time()
+    problem = SokobanPuzzle(wh)
+    node = search.astar_graph_search(problem, problem.h)
     elapsed = time.time() - t0
-    h       = getattr(problem_ref[0], 'h_calls', 0)
 
-    if thread.is_alive():
-        result_queue.put({"file": filename, "status": "timeout",
-                           "elapsed": elapsed, "h_calls": h})
-    elif result[0] is None or result[0][0] == 'Impossible':
-        result_queue.put({"file": filename, "status": "impossible",
-                           "elapsed": elapsed, "h_calls": h})
-    else:
-        sol, cost = result[0]
-        result_queue.put({"file": filename, "status": "solved", "cost": cost,
-                           "steps": len(sol), "elapsed": elapsed, "h_calls": h})
+    if node is None:
+        return filename, 'Impossible', None, None, problem.h_calls, elapsed
+
+    return filename, 'Solved', node.solution(), node.path_cost, problem.h_calls, elapsed
 
 
-# ── GUI ───────────────────────────────────────────────────────────────────────
+def solve_one_process(path, out_queue):
+    """Wrapper so we can kill the process safely."""
+    try:
+        out_queue.put(solve_one(path))
+    except Exception as e:
+        out_queue.put((os.path.basename(path), 'ERROR', None, str(e), 0, 0.0))
 
-class SokobanGUI:
+
+# ─────────────────────────────────────────────────────────────
+class TestAllGUI:
     def __init__(self, root):
-        self.root    = root
-        self.root.title("Sokoban Solver — Warehouse Test Suite")
-        self.root.configure(bg=BG)
-        self.root.geometry("1100x680")
-        self.rows    = {}
+        self.root = root
+        self.root.title("Sokoban Solver — Batch Test")
+        self.root.geometry("900x600")
+
+        self.result_queue = queue.Queue()
         self.running = False
-        self.passed  = self.failed = self.timeouts = 0
-        self.manager = None
-        self.q       = None
+        self.start_time = None
+
+        self.done_count = 0
+        self.solved_count = 0
+        self.impossible_count = 0
+        self.timed_out_count = 0
+
         self._build_ui()
-        self._load_warehouses()
-        self._poll()
+        self._load_puzzle_list()
 
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    # ─────────────────────────────────────────────────────────
     def _build_ui(self):
-        hdr = tk.Frame(self.root, bg=BG)
-        hdr.pack(fill="x", padx=24, pady=(20, 0))
-        tk.Label(hdr, text="SOKOBAN", font=("Courier", 22, "bold"),
-                 fg=ACCENT, bg=BG).pack(side="left")
-        tk.Label(hdr, text=" Warehouse Test Suite", font=("Courier", 14),
-                 fg=TEXT_DIM, bg=BG).pack(side="left", pady=4)
+        toolbar = tk.Frame(self.root)
+        toolbar.pack(fill=tk.X)
 
-        ctrl = tk.Frame(self.root, bg=BG)
-        ctrl.pack(fill="x", padx=24, pady=12)
+        self.run_btn = tk.Button(toolbar, text="▶ Run All",
+                                 command=self.start_solving,
+                                 bg="#28a745", fg="white")
+        self.run_btn.pack(side=tk.LEFT, padx=5)
 
-        self.btn_run = tk.Button(ctrl, text="▶  RUN ALL", font=("Courier", 11, "bold"),
-                                  bg=ACCENT, fg=BG, relief="flat", padx=18, pady=8,
-                                  cursor="hand2", command=self._start)
-        self.btn_run.pack(side="left", padx=(0, 10))
+        self.stop_btn = tk.Button(toolbar, text="■ Stop",
+                                  command=self.stop_solving,
+                                  state=tk.DISABLED,
+                                  bg="#dc3545", fg="white")
+        self.stop_btn.pack(side=tk.LEFT)
 
-        self.btn_stop = tk.Button(ctrl, text="■  STOP", font=("Courier", 11, "bold"),
-                                   bg=DIM, fg=TEXT, relief="flat", padx=18, pady=8,
-                                   cursor="hand2", state="disabled", command=self._stop)
-        self.btn_stop.pack(side="left", padx=(0, 20))
+        tk.Label(toolbar, text=" Workers:").pack(side=tk.LEFT, padx=8)
+        self.workers_var = tk.IntVar(value=N_WORKERS)
+        tk.Spinbox(toolbar, from_=1, to=os.cpu_count(),
+                   textvariable=self.workers_var,
+                   width=4).pack(side=tk.LEFT)
 
-        tk.Label(ctrl, text="Timeout:", font=("Courier", 10),
-                 fg=TEXT_DIM, bg=BG).pack(side="left")
-        self.timeout_var = tk.IntVar(value=DEFAULT_TIMEOUT)
-        tk.Scale(ctrl, from_=5, to=3600, orient="horizontal",
-                 variable=self.timeout_var, bg=BG, fg=TEXT, troughcolor=DIM,
-                 highlightthickness=0, font=("Courier", 9), length=160).pack(side="left", padx=6)
+        tk.Label(toolbar, text=" Timeout (s):").pack(side=tk.LEFT, padx=8)
+        self.timeout_var = tk.IntVar(value=TIMEOUT)
+        self.timeout_spin = tk.Spinbox(toolbar, from_=5, to=3600,
+                                       textvariable=self.timeout_var,
+                                       width=6)
+        self.timeout_spin.pack(side=tk.LEFT)
 
-        tk.Label(ctrl, text="s  Workers:", font=("Courier", 10),
-                 fg=TEXT_DIM, bg=BG).pack(side="left")
-        self.workers_var = tk.IntVar(value=DEFAULT_WORKERS)
-        tk.Scale(ctrl, from_=1, to=mp.cpu_count(), orient="horizontal",
-                 variable=self.workers_var, bg=BG, fg=TEXT, troughcolor=DIM,
-                 highlightthickness=0, font=("Courier", 9), length=100).pack(side="left", padx=6)
+        self.no_timeout_var = tk.BooleanVar()
+        tk.Checkbutton(toolbar, text="No timeout",
+                       variable=self.no_timeout_var,
+                       command=self._toggle_timeout).pack(side=tk.LEFT, padx=6)
 
-        self.summary = tk.Label(self.root,
-                                 text="Ready — press RUN ALL to start",
-                                 font=("Courier", 10), fg=TEXT_DIM, bg=PANEL,
-                                 anchor="w", padx=16, pady=6)
-        self.summary.pack(fill="x", padx=24, pady=(0, 8))
+        stats = tk.Frame(self.root)
+        stats.pack(fill=tk.X)
 
-        tf = tk.Frame(self.root, bg=BG)
-        tf.pack(fill="both", expand=True, padx=24, pady=(0, 16))
+        def stat(label):
+            v = tk.StringVar(value="0")
+            tk.Label(stats, text=label).pack(side=tk.LEFT)
+            tk.Label(stats, textvariable=v,
+                     font=("Helvetica", 10, "bold")).pack(side=tk.LEFT, padx=4)
+            return v
 
-        cols = ("warehouse", "status", "cost", "steps", "h_calls", "time")
-        self.tree = ttk.Treeview(tf, columns=cols, show="headings", selectmode="none")
-        for col, label, width, anchor in [
-            ("warehouse", "Warehouse", 280, "w"),
-            ("status",    "Status",    120, "center"),
-            ("cost",      "Cost",       90, "center"),
-            ("steps",     "Steps",      80, "center"),
-            ("h_calls",   "h() calls", 120, "center"),
-            ("time",      "Time",       90, "center"),
-        ]:
-            self.tree.heading(col, text=label)
-            self.tree.column(col, width=width, anchor=anchor)
+        self.stat_done = stat("Done:")
+        self.stat_solved = stat("Solved:")
+        self.stat_imposs = stat("Impossible:")
+        self.stat_timeout = stat("Timed out:")
+        self.stat_elapsed = stat("Time:")
 
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure("Treeview", background=PANEL, foreground=TEXT,
-                         fieldbackground=PANEL, rowheight=28, font=("Courier", 10))
-        style.configure("Treeview.Heading", background=DIM, foreground=ACCENT,
-                         font=("Courier", 10, "bold"), relief="flat")
-        style.map("Treeview", background=[("selected", DIM)])
+        self.progress = tk.DoubleVar()
+        ttk.Progressbar(stats, variable=self.progress,
+                        maximum=100, length=200).pack(side=tk.RIGHT, padx=10)
 
-        for tag, color in [("pass", "#00d4aa"), ("fail", "#ff4f6d"),
-                            ("timeout", "#f5a623"), ("running", "#7eb8ff"),
-                            ("idle", TEXT_DIM), ("invalid", DIM)]:
-            self.tree.tag_configure(tag, foreground=color)
+        cols = ('file', 'status', 'cost', 'steps', 'h', 'time')
+        self.tree = ttk.Treeview(self.root, columns=cols, show='headings')
+        for c in cols:
+            self.tree.heading(c, text=c.capitalize())
+            self.tree.column(c, anchor='center')
+        self.tree.column('file', width=240, anchor='w')
+        self.tree.pack(fill=tk.BOTH, expand=True)
 
-        sb = ttk.Scrollbar(tf, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=sb.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
+        self.tree.tag_configure('pending', foreground='#888')
+        self.tree.tag_configure('running', background='#fff3cd')
+        self.tree.tag_configure('solved', background='#d4edda')
+        self.tree.tag_configure('impossible', background='#cce5ff')
+        self.tree.tag_configure('timed_out', background='#f8d7da')
+        self.tree.tag_configure('invalid', background='#e2e3e5')
+        self.tree.tag_configure('error', background='#f8d7da')
 
-    def _load_warehouses(self):
-        if not os.path.isdir(WAREHOUSE_FOLDER):
-            self.summary.config(text=f"Folder not found: {WAREHOUSE_FOLDER}")
-            return
-        files = sorted(f for f in os.listdir(WAREHOUSE_FOLDER) if f.endswith('.txt'))
-        for fn in files:
-            iid = self.tree.insert("", "end",
-                                    values=(fn, "waiting", "—", "—", "—", "—"),
-                                    tags=("idle",))
-            self.rows[fn] = iid
-        self.summary.config(text=f"{len(files)} warehouses loaded — press RUN ALL")
+    # ─────────────────────────────────────────────────────────
+    def _load_puzzle_list(self):
+        self.files = sorted(f for f in os.listdir(WAREHOUSE_FOLDER)
+                            if f.endswith('.txt'))
+        self.iid = {}
+        for f in self.files:
+            self.iid[f] = self.tree.insert(
+                '', 'end',
+                values=(f, 'Pending', '', '', '', ''),
+                tags=('pending',)
+            )
 
-    # poll every 300ms — only place UI is updated
-    def _poll(self):
-        if self.q is not None:
-            try:
-                while True:
-                    msg = self.q.get_nowait()
-                    self._handle(msg)
-            except Exception:
-                pass
-        self.root.after(300, self._poll)
+    def _toggle_timeout(self):
+        self.timeout_spin.config(
+            state=tk.DISABLED if self.no_timeout_var.get() else tk.NORMAL
+        )
 
-    def _handle(self, msg):
-        fn  = msg.get("file")
-        iid = self.rows.get(fn)
-        st  = msg["status"]
-
-        if st == "running" and iid:
-            self.tree.item(iid, tags=("running",),
-                values=(fn, f"running {msg['elapsed']:.0f}s",
-                        "—", "—", f"{msg['h_calls']:,}", f"{msg['elapsed']:.1f}s"))
-
-        elif st == "solved" and iid:
-            self.tree.item(iid, tags=("pass",),
-                values=(fn, "Solved ✓", f"{msg['cost']:,}",
-                        str(msg['steps']), f"{msg['h_calls']:,}", f"{msg['elapsed']:.2f}s"))
-            self.passed += 1
-            self._update_summary()
-
-        elif st == "impossible" and iid:
-            self.tree.item(iid, tags=("fail",),
-                values=(fn, "Impossible", "—", "—",
-                        f"{msg['h_calls']:,}", f"{msg['elapsed']:.2f}s"))
-            self.failed += 1
-            self._update_summary()
-
-        elif st == "timeout" and iid:
-            self.tree.item(iid, tags=("timeout",),
-                values=(fn, "TIMEOUT ⏱", "—", "—",
-                        f"{msg['h_calls']:,}", f"{msg['elapsed']:.1f}s"))
-            self.timeouts += 1
-            self._update_summary()
-
-        elif st == "invalid" and iid:
-            self.tree.item(iid, tags=("invalid",),
-                values=(fn, "invalid file", "—", "—", "—", "—"))
-
-        elif st == "all_done":
-            self.running = False
-            self.btn_run.config(state="normal", bg=ACCENT, fg=BG)
-            self.btn_stop.config(state="disabled", bg=DIM, fg=TEXT)
-            if self.manager:
-                self.manager.shutdown()
-                self.manager = None
-
-    def _start(self):
+    # ─────────────────────────────────────────────────────────
+    def start_solving(self):
         if self.running:
             return
+
         self.running = True
-        self.passed  = self.failed = self.timeouts = 0
-        self.btn_run.config(state="disabled", bg=DIM)
-        self.btn_stop.config(state="normal", bg="#ff4f6d", fg="white")
+        self.start_time = time.time()
+        self.run_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk.NORMAL)
 
-        for fn, iid in self.rows.items():
-            self.tree.item(iid, values=(fn, "waiting", "—", "—", "—", "—"),
-                           tags=("idle",))
-        self._update_summary()
+        self.done_count = self.solved_count = \
+            self.impossible_count = self.timed_out_count = 0
 
-        # create a Manager queue — safe to pass to child processes on Windows
-        self.manager = mp.Manager()
-        self.q       = self.manager.Queue()
+        t = threading.Thread(target=self._solver_thread, daemon=True)
+        t.start()
+        self.root.after(150, self._poll)
 
-        timeout = self.timeout_var.get()
-        workers = self.workers_var.get()
-        files   = list(self.rows.keys())
+    # ─────────────────────────────────────────────────────────
+    def _solver_thread(self):
+        timeout = None if self.no_timeout_var.get() else self.timeout_var.get()
+        max_workers = self.workers_var.get()
 
-        threading.Thread(target=self._dispatch,
-                          args=(files, timeout, workers), daemon=True).start()
+        jobs = [(f, os.path.join(WAREHOUSE_FOLDER, f)) for f in self.files]
+        self.active_workers = []  # shared reference
+        active =self.active_workers
 
-    def _dispatch(self, files, timeout, workers):
-        self.pool = mp.Pool(processes=workers)
-        for fn in files:
-            if not self.running:
-                break
-            self.pool.apply_async(solve_warehouse, args=(fn, timeout, self.q))
-        self.pool.close()
-        self.pool.join()
-        if self.q:
-            self.q.put({"file": None, "status": "all_done"})
+        while (jobs or active) and self.running:
 
-    def _stop(self):
-        self.running = False
+            # Launch new workers
+            while jobs and len(active) < max_workers:
+                fname, path = jobs.pop(0)
+                q = mp.Queue()
+                p = mp.Process(target=solve_one_process, args=(path, q))
+                p.start()
+                active.append((fname, p, q, time.time()))
+                self.result_queue.put(('RUNNING', fname))
+
+            # Check running workers
+            for item in active[:]:
+                fname, proc, q, start = item
+
+                if not proc.is_alive():
+                    proc.join()
+                    if not q.empty():
+                        self.result_queue.put(('RESULT', *q.get()))
+                    else:
+                        self.result_queue.put(('RESULT',
+                                               fname, 'ERROR', None, '', 0, 0.0))
+                    active.remove(item)
+
+                elif timeout and time.time() - start >= timeout:
+                    proc.terminate()
+                    proc.join()
+                    self.result_queue.put(('RESULT',
+                                           fname, 'TIMED OUT',
+                                           None, None, 0, timeout))
+                    active.remove(item)
+
+            time.sleep(0.1)
+
+        self.result_queue.put(('DONE',))
+
+    # ─────────────────────────────────────────────────────────
+    def _poll(self):
         try:
-            self.pool.terminate()
-        except Exception:
+            while True:
+                msg = self.result_queue.get_nowait()
+
+                if msg[0] == 'DONE':
+                    self.running = False
+                    self.run_btn.config(state=tk.NORMAL)
+                    self.stop_btn.config(state=tk.DISABLED)
+                    return
+
+                elif msg[0] == 'RUNNING':
+                    f = msg[1]
+                    self.tree.item(self.iid[f],
+                                   values=(f, 'Running', '', '', '', ''),
+                                   tags=('running',))
+
+                elif msg[0] == 'RESULT':
+                    _, f, status, sol, cost, h, t = msg
+                    self.done_count += 1
+
+                    if status == 'Solved':
+                        self.solved_count += 1
+                        vals = (f, 'Solved', cost, len(sol), h, f"{t:.2f}")
+                        tag = 'solved'
+                    elif status == 'Impossible':
+                        self.impossible_count += 1
+                        vals = (f, 'Impossible', '', '', h, f"{t:.2f}")
+                        tag = 'impossible'
+                    elif status == 'TIMED OUT':
+                        self.timed_out_count += 1
+                        vals = (f, 'Timed out', '', '', '', f">{t:.0f}")
+                        tag = 'timed_out'
+                    elif status == 'INVALID':
+                        self.done_count -= 1
+                        vals = (f, 'Invalid', '', '', '', '')
+                        tag = 'invalid'
+                    else:
+                        vals = (f, 'Error', '', '', '', '')
+                        tag = 'error'
+
+                    self.tree.item(self.iid[f], values=vals, tags=(tag,))
+
+        except queue.Empty:
             pass
-        self.btn_run.config(state="normal", bg=ACCENT, fg=BG)
-        self.btn_stop.config(state="disabled", bg=DIM, fg=TEXT)
-        self.summary.config(text="Stopped by user.")
 
-    def _update_summary(self):
-        total = len(self.rows)
-        done  = self.passed + self.failed + self.timeouts
-        self.summary.config(
-            text=f"  {done}/{total} done   |   ✓ {self.passed} solved"
-                 f"   |   ✗ {self.failed} impossible   |   ⏱ {self.timeouts} timeout")
+        total = len(self.files)
+        self.stat_done.set(f"{self.done_count}/{total}")
+        self.stat_solved.set(str(self.solved_count))
+        self.stat_imposs.set(str(self.impossible_count))
+        self.stat_timeout.set(str(self.timed_out_count))
+        self.progress.set(self.done_count / total * 100 if total else 0)
+        self.stat_elapsed.set(f"{time.time() - self.start_time:.1f}s")
+
+        if self.running:
+            self.root.after(150, self._poll)
+
+    # ─────────────────────────────────────────────────────────
+    def stop_solving(self):
+        self.running = False
+
+        # HARD KILL all active workers
+        if hasattr(self, 'active_workers'):
+            for fname, proc, q, start in self.active_workers:
+                if proc.is_alive():
+                    proc.terminate()
+                    proc.join(timeout=0.2)
+
+            self.active_workers.clear()
+
+        self.run_btn.config(state=tk.NORMAL)
+        self.stop_btn.config(state=tk.DISABLED)
+
+    def _on_close(self):
+        self.running = False
+
+        if hasattr(self, 'active_workers'):
+            for fname, proc, q, start in self.active_workers:
+                if proc.is_alive():
+                    proc.terminate()
+                    proc.join(timeout=0.2)
+
+            self.active_workers.clear()
+
+        self.root.destroy()
 
 
-if __name__ == "__main__":
-    mp.freeze_support()  # required on Windows
+# ─────────────────────────────────────────────────────────────
+if __name__ == '__main__':
+    mp.freeze_support()
+    mp.set_start_method('spawn', force=True)
+
     root = tk.Tk()
-    SokobanGUI(root)
+    app = TestAllGUI(root)
+
+    signal.signal(signal.SIGINT,
+                  lambda *_: root.after(0, app._on_close))
+
     root.mainloop()
