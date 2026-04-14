@@ -38,7 +38,7 @@ import sokoban
 
 def my_team():
 
-    return [ (11806427, 'Aathmika', 'Gokula Krishna'), (11539658, 'Jack', 'Hillman'), (1234569, 'Eva', 'Tardos') ]
+    return [ (11806427, 'Aathmika', 'Gokula Krishna'), (11539658, 'Jack', 'Hillman'), (12425605, 'Sultan', 'Sajid') ]
 
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
