@@ -151,7 +151,45 @@ def taboo_cells(warehouse):
     for (x, y) in taboo:
         vis[y][x] = 'X'
     return '\n'.join(''.join(row) for row in vis)
+    
+def min_matching_cost(boxes, targets, weights):
+    targets_list = list(targets)
+    pairs = []
+    for i, box in enumerate(boxes):
+        scale = 1 + weights[i]
+        for j, t in enumerate(targets_list):
+            dist = abs(box[0] - t[0]) + abs(box[1] - t[1])
+            pairs.append((dist * scale, i, j))
+    pairs.sort()
+    assigned_boxes = set()
+    assigned_targets = set()
+    total = 0
+    for cost, bi, ti in pairs:
+        if bi in assigned_boxes or ti in assigned_targets:
+            continue
+        total += cost
+        assigned_boxes.add(bi)
+        assigned_targets.add(ti)
+        if len(assigned_boxes) == len(boxes):
+            break
+    return total
 
+def h(self, node):
+    worker, boxes = node.state
+    unsettled = [(i, b) for i, b in enumerate(boxes) if b not in self.targets]
+    if not unsettled:
+        return 0
+    unsettled_indices, unsettled_boxes = zip(*unsettled)
+    unsettled_weights = [self.weights[i] for i in unsettled_indices]
+    matching_cost = min_matching_cost(
+        unsettled_boxes, self.targets, unsettled_weights
+    )
+    worker_dist = min(
+        abs(worker[0] - b[0]) + abs(worker[1] - b[1])
+        for b in unsettled_boxes
+    )
+    self.h_calls = getattr(self, 'h_calls', 0) + 1
+    return matching_cost + worker_dist
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
 
