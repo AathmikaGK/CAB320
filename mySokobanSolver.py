@@ -194,6 +194,9 @@ class SokobanPuzzle(search.Problem):
 
         initial_state = (warehouse.worker, tuple(warehouse.boxes))
         super().__init__(initial_state)
+        self._h_cache = {}
+        self.h_calls = 0
+
 
     def actions(self, state): #checks each direction; left right up down. returns a list of valid actions that avoid taboo cells or walls or moving boxes into places that are bad
         worker, boxes = state
@@ -244,17 +247,41 @@ class SokobanPuzzle(search.Problem):
         return c + 1
     
     def h(self, node):
-        worker, boxes = node.state
-        total = 0
-        for i, box in enumerate(boxes):
-            if box in self.targets:
-                continue
-            weight = self.weights[i]
-            min_dist = min(abs(box[0]-t[0]) + abs(box[1]-t[1]) 
-                        for t in self.targets)
-            total += min_dist * (1 + weight)
-        self.h_calls = getattr(self, 'h_calls', 0) + 1
-        return total
+        self.h_calls += 1
+
+        # Cache results: astar may evaluate the same state from different paths
+        state = node.state
+        if state in self._h_cache:
+            return self._h_cache[state]
+
+        worker, boxes = state
+        targets = list(self.targets)
+
+        unplaced = [(i, box) for i, box in enumerate(boxes) if box not in self.targets]
+
+        if not unplaced:
+            self._h_cache[state] = 0
+            return 0
+
+        # For each unplaced box, take the minimum push cost to any target.
+        min_box_cost = sum(
+            min(
+                (abs(bpos[0] - t[0]) + abs(bpos[1] - t[1])) * (1 + self.weights[bi])
+                for t in targets
+            )
+            for bi, bpos in unplaced
+        )
+
+        # Worker must walk to at least one unplaced box before pushing starts.
+        # This repositioning cost is independent of (and additive to) push costs.
+        worker_dist = min(
+            abs(worker[0] - bpos[0]) + abs(worker[1] - bpos[1])
+            for _, bpos in unplaced
+        )
+
+        result = min_box_cost + worker_dist
+        self._h_cache[state] = result
+        return result
     
 
 
