@@ -101,25 +101,30 @@ def taboo_cells(warehouse):
             if (x, y) not in walls and (x, y) not in outside:
                 inside.add((x, y))
 
-    # Step 2: Rule 1 - a non-target cell that has a wall on at least one horizontal
-    # AND at least one vertical neighbour is a "corner" and therefore taboo
-    taboo = set()
+    # Step 2: Find ALL geometric corners (wall on at least one horizontal
+    # AND at least one vertical neighbour). These are used as anchors for Rule 2.
+    all_corners = set()
     for (x, y) in inside:
-        if (x, y) in targets:
-            continue
         wall_h = (x - 1, y) in walls or (x + 1, y) in walls
         wall_v = (x, y - 1) in walls or (x, y + 1) in walls
         if wall_h and wall_v:
-            taboo.add((x, y))
+            all_corners.add((x, y))
 
-    # Step 3: Rule 2 - cells between two taboo corners along a wall with no target
+    # Rule 1: corner and not a target → taboo
+    taboo = set(c for c in all_corners if c not in targets)
+
+    # Step 3: Rule 2 - cells between two corners along a wall with no target.
+    # Use ALL geometric corners as anchors (including corners on targets),
+    # because a target on a corner still forms a wall-line boundary.
     # Horizontal: same row, wall consistently above or below the whole segment
     for y in range(nrows):
-        row_corners = sorted(x for (x, ry) in taboo if ry == y)
+        row_corners = sorted(x for (x, ry) in all_corners if ry == y)
         for i in range(len(row_corners)):
             for j in range(i + 1, len(row_corners)):
                 x1, x2 = row_corners[i], row_corners[j]
                 between = [(x, y) for x in range(x1 + 1, x2)]
+                if not between:
+                    continue
                 if not all(c in inside for c in between):
                     continue
                 if any(c in targets for c in between):
@@ -132,11 +137,13 @@ def taboo_cells(warehouse):
 
     # Vertical: same column, wall consistently left or right of the whole segment
     for x in range(ncols):
-        col_corners = sorted(y for (cx, y) in taboo if cx == x)
+        col_corners = sorted(y for (cx, y) in all_corners if cx == x)
         for i in range(len(col_corners)):
             for j in range(i + 1, len(col_corners)):
                 y1, y2 = col_corners[i], col_corners[j]
                 between = [(x, y) for y in range(y1 + 1, y2)]
+                if not between:
+                    continue
                 if not all(c in inside for c in between):
                     continue
                 if any(c in targets for c in between):
@@ -166,32 +173,127 @@ class SokobanPuzzle(search.Problem):
     An instance contains information about the walls, the targets, the boxes
     and the worker.
 
-    Your implementation should be fully compatible with the search functions of 
-    the provided module 'search.py'. 
-    
-    '''
-    
-    #
-    #         "INSERT YOUR CODE HERE"
-    #
-    #     Revisit the sliding puzzle and the pancake puzzle for inspiration!
-    #
-    #     Note that you will need to add several functions to 
-    #     complete this class. For example, a 'result' method is needed
-    #     to satisfy the interface of 'search.Problem'.
-    #
-    #     You are allowed (and encouraged) to use auxiliary functions and classes
+    Your implementation should be fully compatible with the search functions of
+    the provided module 'search.py'.
 
-    
+    '''
     def __init__(self, warehouse):
-        raise NotImplementedError()
+        self.walls = set(warehouse.walls)
+        self.targets = set(warehouse.targets)
+        self.targets_list = list(warehouse.targets)
+        self.weights = list(warehouse.weights)
+
+        self.direction_map = {
+            'Left':  (-1,  0),
+            'Right': ( 1,  0),
+            'Up':    ( 0, -1),
+            'Down':  ( 0,  1),
+        }
+
+        taboo_string = taboo_cells(warehouse)
+        self.taboo = set()
+        for y, row in enumerate(taboo_string.split('\n')):
+            for x, char in enumerate(row):
+                if char == 'X':
+                    self.taboo.add((x, y))
+
+        initial_state = (warehouse.worker, tuple(warehouse.boxes))
+        super().__init__(initial_state)
+
+    def _is_simple_deadlock(self, boxes_set, pushed_box):
+        '''Check if pushing a box to pushed_box creates a 2x2 deadlock.
+        A 2x2 square of walls/boxes with at least one box not on a target
+        is an unsolvable configuration.'''
+        x, y = pushed_box
+        for dx, dy in [(0, 0), (-1, 0), (0, -1), (-1, -1)]:
+            cells = [
+                (x + dx,     y + dy),
+                (x + dx + 1, y + dy),
+                (x + dx,     y + dy + 1),
+                (x + dx + 1, y + dy + 1),
+            ]
+            if all(c in self.walls or c in boxes_set for c in cells):
+                if any(c in boxes_set and c not in self.targets for c in cells):
+                    return True
+        return False
 
     def actions(self, state):
-        """
-        Return the list of actions that can be executed in the given state.
-        
-        """
-        raise NotImplementedError
+        worker, boxes = state
+        boxes_set = set(boxes)
+        valid_actions = []
+
+        for direction, (dx, dy) in self.direction_map.items():
+            new_worker = (worker[0]+dx, worker[1]+dy)
+
+            if new_worker in self.walls:
+                continue
+            if new_worker in boxes_set:
+                new_box = (new_worker[0]+dx, new_worker[1]+dy)
+                if new_box in self.walls or new_box in boxes_set:
+                    continue
+                if new_box in self.taboo:
+                    continue
+                # Check for 2x2 deadlock after this push
+                new_boxes_set = (boxes_set - {new_worker}) | {new_box}
+                if self._is_simple_deadlock(new_boxes_set, new_box):
+                    continue
+            valid_actions.append(direction)
+        return valid_actions
+
+    def result(self, state, action):
+        worker, boxes = state
+        boxes = list(boxes)
+        dx, dy = self.direction_map[action]
+        new_worker = (worker[0] + dx, worker[1] + dy)
+
+        if new_worker in boxes:
+            idx = boxes.index(new_worker)
+            new_box = (new_worker[0] + dx, new_worker[1] + dy)
+            boxes[idx] = new_box
+
+        return (new_worker, tuple(boxes))
+
+    def goal_test(self, state):
+        worker, boxes = state
+        return all(box in self.targets for box in boxes)
+
+    def path_cost(self, c, state1, action, state2):
+        boxes1 = state1[1]
+        boxes2 = state2[1]
+
+        for i, (b1, b2) in enumerate(zip(boxes1, boxes2)):
+            if b1 != b2:
+                weight = self.weights[i]
+                return c + 1 + weight
+
+        return c + 1
+
+    def h(self, node):
+        '''Admissible heuristic: for each box not yet on a target, compute
+        the Manhattan distance to its nearest target multiplied by (1 + weight).
+        Sum all boxes. Also add the minimum worker distance to any non-goal box
+        since the worker must walk there before any useful push.'''
+        worker, boxes = node.state
+        total = 0
+        non_goal_boxes = []
+        for i, box in enumerate(boxes):
+            if box in self.targets:
+                continue
+            non_goal_boxes.append(i)
+            weight = self.weights[i]
+            min_dist = min(abs(box[0]-t[0]) + abs(box[1]-t[1])
+                        for t in self.targets)
+            total += min_dist * (1 + weight)
+        # Add minimum worker distance to nearest non-goal box
+        if non_goal_boxes:
+            min_worker_dist = min(
+                abs(worker[0] - boxes[i][0]) + abs(worker[1] - boxes[i][1])
+                for i in non_goal_boxes
+            )
+            total += min_worker_dist
+        return total
+    
+
 
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
