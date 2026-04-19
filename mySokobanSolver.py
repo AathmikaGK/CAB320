@@ -96,25 +96,30 @@ def taboo_cells(warehouse):
             if (x, y) not in walls and (x, y) not in outside:
                 inside.add((x, y))
 
-    # Step 2: Rule 1 - a non-target cell that has a wall on at least one horizontal
-    # AND at least one vertical neighbour is a "corner" and therefore taboo
-    taboo = set()
+    # Step 2: Find ALL geometric corners (wall on at least one horizontal
+    # AND at least one vertical neighbour). These are used as anchors for Rule 2.
+    all_corners = set()
     for (x, y) in inside:
-        if (x, y) in targets:
-            continue
         wall_h = (x - 1, y) in walls or (x + 1, y) in walls
         wall_v = (x, y - 1) in walls or (x, y + 1) in walls
         if wall_h and wall_v:
-            taboo.add((x, y))
+            all_corners.add((x, y))
 
-    # Step 3: Rule 2 - cells between two taboo corners along a wall with no target
+    # Rule 1: corner and not a target → taboo
+    taboo = set(c for c in all_corners if c not in targets)
+
+    # Step 3: Rule 2 - cells between two corners along a wall with no target.
+    # Use ALL geometric corners as anchors (including corners on targets),
+    # because a target on a corner still forms a wall-line boundary.
     # Horizontal: same row, wall consistently above or below the whole segment
     for y in range(nrows):
-        row_corners = sorted(x for (x, ry) in taboo if ry == y)
+        row_corners = sorted(x for (x, ry) in all_corners if ry == y)
         for i in range(len(row_corners)):
             for j in range(i + 1, len(row_corners)):
                 x1, x2 = row_corners[i], row_corners[j]
                 between = [(x, y) for x in range(x1 + 1, x2)]
+                if not between:
+                    continue
                 if not all(c in inside for c in between):
                     continue
                 if any(c in targets for c in between):
@@ -127,11 +132,13 @@ def taboo_cells(warehouse):
 
     # Vertical: same column, wall consistently left or right of the whole segment
     for x in range(ncols):
-        col_corners = sorted(y for (cx, y) in taboo if cx == x)
+        col_corners = sorted(y for (cx, y) in all_corners if cx == x)
         for i in range(len(col_corners)):
             for j in range(i + 1, len(col_corners)):
                 y1, y2 = col_corners[i], col_corners[j]
                 between = [(x, y) for y in range(y1 + 1, y2)]
+                if not between:
+                    continue
                 if not all(c in inside for c in between):
                     continue
                 if any(c in targets for c in between):
@@ -151,7 +158,6 @@ def taboo_cells(warehouse):
     for (x, y) in taboo:
         vis[y][x] = 'X'
     return '\n'.join(''.join(row) for row in vis)
-
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
 
